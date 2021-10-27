@@ -65,7 +65,7 @@ int main(int argv, char** args) {
     long long next_frame=0;
     long long last_frame[60];
     int max_fps=60;
-    int clock_speed=307200000;
+    int clock_speed=3072000;
     int clocks_per_frame=clock_speed/max_fps;
 
     // insert code here...
@@ -101,25 +101,28 @@ int main(int argv, char** args) {
         }
         if (filename.find(".com")<0x1000){
             load_file(c,cpu.memory,0x0100);
+            clocks_per_frame*=1000;
         }
         //SDL_Delay(1000);
         cout<<endl<<endl;
 
     }
 
-
+    unsigned short po;
+    unsigned char* f=(unsigned char*)&po;
 
     last_frame[0]=5;
      //cpu.load_state("sav.bin");
 
     while (running){
         if(true){
-            next_frame=systime+1000000/(max_fps);
+            //next_frame=systime+1000000/(max_fps);
+            next_frame=systime+1000000/(60);
 
             double fps =(1000000.0/(systime-last_frame[59])*60);
             if(systime - last_fps_update>500000){
                 last_fps_update=systime;
-                SDL_SetWindowTitle(screen.window,to_string(fps).c_str());
+                SDL_SetWindowTitle(screen.window,to_string(fps*max_fps/60).c_str());
                 //cout<<to_string(fps).c_str()<<endl;
             }
 
@@ -157,6 +160,7 @@ int main(int argv, char** args) {
                         case SDLK_m:cpu.load_state("sav.bin"); break;
                         case SDLK_q:max_fps=300; break;
                         case SDLK_u:max_fps=3000; break;
+                        case SDLK_i:max_fps=30000; break;
                         case SDLK_7:max_fps=30; break;
                     }
 
@@ -175,6 +179,7 @@ int main(int argv, char** args) {
                         case SDLK_x:cpu.credit_button=true;break;
                         case SDLK_q:max_fps=60; break;
                         case SDLK_u:max_fps=60; break;
+                        case SDLK_i:max_fps=60; break;
                     }
 
                 }
@@ -189,22 +194,23 @@ int main(int argv, char** args) {
             //}
             //cpu.cycles-=clocks_per_frame/2;
             //cpu.run_innterrupt(0xcf);
-            while(cpu.cycles<=51200){
-                cpu.cycle();
-                //cout<<cpu.cycles<<endl;
+            for (int i = 0; i < max_fps/60; ++i) {
+                while(cpu.cycles<=clocks_per_frame){//51200
+                    cpu.cycle();
+                    //cout<<cpu.cycles<<endl;
+                }
+                cpu.cycles=0;
+                cpu.run_maskable_innterrupt(0);
             }
 
-            //SDL_Delay(100);
-            cpu.cycles=0;
-            cpu.run_maskable_innterrupt(0);
 
 
             //for (int i = 0; i < 50000; ++i){cpu.cycle();}
             if ((systime-last_frame_render)/1000>15){
                 last_frame_render=systime;
-                screen.render(cpu.memory);
+                //screen.render(cpu.memory);
             }
-            //screen.render(cpu.memory);
+            screen.render(cpu.memory);
 
             //thread thread_obj(screen.render,cpu.memory);
 

@@ -17,10 +17,14 @@ private:
     SDL_Renderer *renderer;
     SDL_Rect screen_rect;
     int timer;
-    TTF_Font * Sans = TTF_OpenFont("C:\\Users\\Pat\\CLionProjects\\z80\\PressStart2P.ttf", 25);
+    /*TTF_Font * Sans = TTF_OpenFont("PressStart2P.ttf", 25);
+    if (Sans == NULL) {
+        fprintf(stderr, "error: font not found\n");
+        exit(EXIT_FAILURE);
+    }*/
     SDL_Color White = {255, 255, 255};
     SDL_Color palettes[0x100];
-    int render_scale=3;
+    int render_scale=2;
 
 public:
     SDL_Window *window=NULL;
@@ -88,25 +92,6 @@ public:
         SDL_SetRenderDrawColor( renderer, 255, 255, 255, 255 );
         render_tiles(disp);
         render_sprites(disp);
-
-
-
-
-
-        TTF_Font * Sans = TTF_OpenFont("PressStart2P.ttf", 25);
-        if (Sans == NULL) {
-            fprintf(stderr, "error: font not found\n");
-            exit(EXIT_FAILURE);
-        }
-
-
-
-
-
-
-
-
-
 
 
         SDL_RenderPresent(renderer);

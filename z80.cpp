@@ -3,16 +3,18 @@
 #include <fstream>
 using namespace std;
 #define M read_byte(get_hl())
+#define GET_BIT(n, val) (((val) >> (n)) & 1)
 class z80
 {
+public:
 
     private:
     FILE * fp;
     unsigned char interupt_data;
     unsigned char interrupt_vector;
     bool debug= false;
-    bool cpm= false;
-    long long breakpoint=0;//767742574;
+    bool cpm= true;
+    long long breakpoint=0;//0x1549420e6;//767742574;
     unsigned char OPCODES_CYCLES[256] = {
 //  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
             4,10, 7, 6, 4, 4, 7, 4, 4,11, 7, 6, 4, 4, 7, 4,
@@ -134,6 +136,8 @@ class z80
     bool halt=false;
     
     long long tc=-1;
+    long long last_write;
+    unsigned char lbr=0;
 
     unsigned char B=0;
     unsigned char C=0;
@@ -161,6 +165,8 @@ class z80
     unsigned short index;
 
     unsigned short sp=0;
+
+    unsigned short wz;//internal register
 
     unsigned char i;
     unsigned char r;
@@ -313,6 +319,8 @@ class z80
     void write_byte(unsigned short adr,unsigned char x){
         if(cpm){
             memory[adr]=x;
+            lbr=x;
+
             return;
         }
         adr&=0x7fff;
@@ -374,22 +382,26 @@ class z80
     }
     void jump(unsigned short adr){
         pc=adr;
+        wz=adr;
     }
     void cond_jump(bool cond){
         unsigned short adr=next_word();
         if(cond){
             jump(adr);
         }
+        wz=adr;
         //else{cycles-=5;}
     }
     void relative_jump(signed char adr_ofset){
         pc+=adr_ofset;
+        wz=pc;
     }
     void relative_cond_jump(bool cond){
         unsigned char adr_ofset=next_byte();
         if(cond){
             relative_jump(adr_ofset);
         }
+        wz=pc;
         //else{cycles-=5;}
     }
     void DJNZ(unsigned char& x){
@@ -405,6 +417,7 @@ class z80
     void call(unsigned short adr){
         PUSH(pc);
         jump(adr);
+        wz=adr;
     }
     void cond_call(bool cond){
         unsigned short adr=next_word();
@@ -412,10 +425,12 @@ class z80
             call(adr);
             cycles+=7;
         }
+        wz=adr;
         //else{cycles-=7;}
     }
     void ret(){
         pc=POP();
+        wz=pc;
     }
     void cond_ret(bool cond){
         if(cond){
@@ -508,6 +523,7 @@ class z80
         carry=cy;
         parity=(((x ^ y) & (x ^ result)) > 0x7fff);
         n=true;
+        wz=x+1;
         return result;
     }
     unsigned short add16(unsigned short x, unsigned short y){
@@ -517,15 +533,15 @@ class z80
         halfcarry=((result & 0x0fff) < (x & 0x0fff));
         f3=((result & (0x08 << 8)) != 0);
         f5=((result & (0x20 << 8)) != 0);
+        wz=x+1;
         return  result;
-
     }
 
-
-
     void PUSH(unsigned short x){
-        write_byte(--sp,x >> 8);
-        write_byte(--sp,x & 0xFF);
+        sp-=2;
+        write_word(sp,x);
+        //write_byte(--sp,x >> 8);
+        //write_byte(--sp,x & 0xFF);
     }
     unsigned short POP(){
         unsigned short temp=(read_byte(sp+1) << 8) | read_byte(sp);
@@ -595,6 +611,26 @@ class z80
         return x;
     }
 
+    unsigned char rr(unsigned  char x){
+        /*n= false;
+        halfcarry= false;
+        bool cy=carry;
+        x = (x << 1) | (cy<<7);
+        check_ZSP(x);
+        set_35(x);
+        return x;*/
+        const bool c = carry;
+        carry = x & 1;
+        x = (x >> 1) | (c << 7);
+        sign = x >> 7;
+        zero = x == 0;
+        n = false;
+        halfcarry = false;
+        check_parity(x);
+        set_35(x);
+        return x;
+    }
+
 
     unsigned char sla(unsigned char x){
         n=false;
@@ -602,6 +638,25 @@ class z80
         carry = x >> 7;
         x = (x << 1);
 
+        check_ZSP(x);
+        set_35(x);
+        return x;
+    }
+    unsigned char sll(unsigned char x){
+        n=false;
+        halfcarry=false;
+        carry = x >> 7;
+        x = (x << 1)|1;
+
+        check_ZSP(x);
+        set_35(x);
+        return x;
+    }
+    unsigned char sra(unsigned char x){
+        n= false;
+        halfcarry= false;
+        carry=x&1;
+        x=(x>>1)|(x&0x80);
         check_ZSP(x);
         set_35(x);
         return x;
@@ -656,17 +711,21 @@ class z80
         f5=x&0x20;
     }
     void testbit(int ofset,unsigned char reg){
+        reg=reg&(1<<ofset);
         n=false;
         halfcarry=true;
         //sign unknown
         //p/v unknown
-        sign=false;
-        zero=((reg>>ofset)&1)==0;
+        //sign=false;
+        //zero=((reg>>ofset)&1)==0;
+        sign=reg>>7;
+        zero=reg==0;
         parity=zero;
+
         set_35(reg);
     }
     unsigned char setbit(int ofset,unsigned char reg){
-        return reg^(1<<ofset);
+        return reg|(1<<ofset);
     }
     unsigned char resetbit(int ofset,unsigned char reg){
         return reg& ~(1 << ofset);
@@ -690,7 +749,7 @@ class z80
         carry=c;
         parity=get_bc()!=0;
         f5=((temp&0x2)!=0);
-        f3=((temp&0x8)==0);
+        f3=((temp&0x8)!=0);
         //fprintf(fp,
         //        "temp: %08X\n",
         //        temp);
@@ -698,6 +757,7 @@ class z80
     void cpd(){
         cpi();
         set_hl(get_hl()-2);
+        wz-=2;
     }
     void cpi(){
         bool cy=carry;
@@ -708,8 +768,16 @@ class z80
         carry=cy;
         result-=halfcarry;
         f5=((result&0x2)!=0);
-        f3=((result&0x8)==0);
+        f3=((result&0x8)!=0);
+        wz++;
     }
+    void ldd(){
+        ldi();
+        set_hl(get_hl()-2);
+        set_de(get_de()-2);
+
+    }
+
     unsigned char in(unsigned char port){
         cout<<"read ioport "<<(int)port<<endl;
         switch(port){
@@ -814,17 +882,20 @@ public:
             }
             if(cpm){
                 pc=0x100;
-                memory[5]=0xc9;
+                //memory[5]=0xc9;
                 //sp=0x2400;
                 // inject "out 1,a" at 0x0000 (signal to stop the test)
-                memory[0x0000] = 0xC3;
+                memory[0x0000] = 0xD3;
                 memory[0x0001] = 0x00;
-                memory[0x0002] = 0x01;
+                //memory[0x0002] = 0x01;
 
                 // inject "in a,0" at 0x0005 (signal to output some characters)
                 //memory[0x0005] = 0xDB;
                 //memory[0x0006] = 0x00;
                 //memory[0x0007] = 0xC9;
+                memory[0x0005] = 0xDB;
+                memory[0x0006] = 0x00;
+                memory[0x0007] = 0xC9;
                 set_af(0xffff);set_bc(0xffff);set_de(0xffff);set_hl(0xffff);set_ix(0xffff);set_iy(0xffff);sp=0xffff;
             }
         }
@@ -919,18 +990,19 @@ public:
         }
         if(breakpoint!=0){
             if(tc==breakpoint){
+                cout<<last_write<<endl;
                 exit(0);
             }
             if (tc>=0x3000){
                 //debug=true;
             }
-            if(tc>=5348000355L){
+            if(tc>=0x155ece7b3){
                 unsigned char temp=0;
                 for (int j = 0x4400; j <0x4800 ; ++j) {
-                    temp+=memory[j];
+                    //temp+=memory[j];
                 }
                 fprintf(fp,//                        "TC: %10X, PC: %04X, AF: %04X, BC: %04X, DE: %04X, HL: %04X, SP: %04X, IX: %04X, IY: %04X, M: %02X, OP: %08X CYC: %04X\n",
-                        "TC: 1%08X, PC: %04X, AF: %04X, BC: %04X, DE: %04X, HL: %04X, SP: %04X, IX: %04X, IY: %04X, M: %02X, CYC: %04X\n",
+                        "TC: %016X, PC: %04X, AF: %04X, BC: %04X, DE: %04X, HL: %04X, SP: %04X, IX: %04X, IY: %04X, M: %02X, CYC: %04X, LBR: %04X\n",
                         tc,
                         pc,
                         get_af(),
@@ -941,7 +1013,7 @@ public:
                         get_ix(),
                         get_iy(),
                         read_byte(get_hl()),
-                        read_byte(pc)<<24|read_byte(pc+1)<<16|read_byte(pc+2)<<8|read_byte(pc+3),0);
+                        read_byte(pc)<<24|read_byte(pc+1)<<16|read_byte(pc+2)<<8|read_byte(pc+3),lbr, 0);
             }
         }
 
@@ -955,7 +1027,7 @@ public:
                         cout<<((unsigned char)memory[get_de()+z]);
                         z++;
                     }
-                    //cout<<"("<<tc<<")";
+                    cout<<"("<<tc<<")";
                 }
                 else if (C==2){
                     cout<<(char)E;
@@ -1013,6 +1085,7 @@ public:
                 break;
             case 0x2://stax b
                 write_byte(get_bc(),A);
+                wz=(A << 8)|((get_bc()+1)&0xFF);
                 break;
             case 0x3://inc bc
                 set_bc(get_bc()+1);
@@ -1042,6 +1115,7 @@ public:
                 break;
             case 0xa://ldax b
                 A=read_byte(get_bc());
+                wz=get_bc()+1;
                 break;
             case 0xb://dcx b
                 set_bc(get_bc()-1);
@@ -1066,6 +1140,7 @@ public:
                 break;
             case 0x12://stax d
                 write_byte(get_de(),A);
+                wz=(A << 8)|((get_de()+1)&0xFF);
                 break;
             case 0x13://inc de
                 set_de(get_de()+1);
@@ -1090,6 +1165,7 @@ public:
                 break;
             case 0x1a://ldax d
                 A=read_byte(get_de());
+                wz=get_bc()+1;
                 break;
             case 0x1b://dcx d
                 set_de(get_de()-1);
@@ -1113,8 +1189,13 @@ public:
                 set_hl(next_word());
                 break;
             case 0x22://shld d16
-                write_word(next_word(),get_hl());
+            {
+                unsigned short temp = next_word();
+                write_word(temp,get_hl());
+                wz=temp+1;
                 break;
+            }
+
             case 0x23://inc hl
                 set_hl(get_hl()+1);
                 break;
@@ -1137,8 +1218,13 @@ public:
                 set_hl(add16(get_hl(),get_hl()));
                 break;
             case 0x2a://lhld d16
-                set_hl(read_word(next_word()));
+            {
+                unsigned short temp=next_word();
+                set_hl(read_word(temp));
+                wz=temp+1;
                 break;
+            }
+
             case 0x2b://dcx hl
                 set_hl(get_hl()-1);
                 break;
@@ -1164,8 +1250,13 @@ public:
                 sp=next_word();
                 break;
             case 0x32://sta d16
-                write_byte(next_word(),A);
+            {
+                unsigned short temp=next_word();
+                write_byte(temp,A);
+                wz=(A<<8)|((temp+1)&0xFF);
                 break;
+            }
+
             case 0x33://inc sp
                 sp++;
                 break;
@@ -1199,8 +1290,12 @@ public:
                 set_hl(add16(get_hl(),sp));
                 break;
             case 0x3a://lda d16
-                A=read_byte(next_word());
+            {
+                unsigned short temp=next_word();
+                A=read_byte(temp);
+                wz=temp+1;
                 break;
+            }
             case 0x3b://dcx sp
                 sp--;
                 break;
@@ -1668,8 +1763,13 @@ public:
                 cond_jump(!carry);
                 break;
             case 0xd3://out d8
-                out(A,next_byte());
+            {
+                unsigned short port =next_byte();
+                out(A,port);
+                wz=(A<<8)|(port+1);
                 break;
+            }
+
             case 0xd4://cnc d16
                 cond_call(!carry);
                 break;
@@ -1705,13 +1805,18 @@ public:
                 cond_jump(carry);
                 break;
             case 0xdb://in d8
+            {
+                unsigned char a=A;
                 if(!cpm){
-                   A=in(next_byte()); 
+                    A=in(next_byte());
                 }
                 else{
+                    A=0xff;
                     pc++;
                 }
+                wz=(a<<8)|(A+1);
                 break;
+            }
             case 0xdc://cc d16
                 cond_call(carry);
                 break;
@@ -1738,6 +1843,7 @@ public:
                 unsigned short temp=POP();
                 PUSH(get_hl());
                 set_hl(temp);
+                wz=temp;
             }
                 break;
             case 0xe4://cpo d16
@@ -1845,9 +1951,13 @@ public:
             case 0x42:if(debug){cout<<"sbc hl,bc"<<endl; }
                 set_hl(sbc16(get_hl(),get_bc()));
                 break;
-            case 0x43:if(debug){cout<<"ld adr bc"<<endl; }
-                write_word(next_word(),get_bc());
+            case 0x43:if(debug){cout<<"ld adr bc"<<endl; }{
+                unsigned short temp = next_word();
+                write_word(temp,get_bc());
+                wz=temp+1;
                 break;
+            }
+
             case 0x44:if(debug){cout<<"neg a"<<endl; }{
                 int tmp=A;
                 A=0;
@@ -1867,47 +1977,102 @@ public:
             case 0x4a:if(debug){cout<<"adc hl,bc"<<endl; }
                 set_hl(adc16(get_hl(),get_bc()));
                 break;
-            case 0x4b:if(debug){cout<<"ld bc, adr"<<endl; }
-                set_bc(read_word(next_word()));
+            case 0x4b:if(debug){cout<<"ld bc, adr"<<endl; }{
+                unsigned short temp=next_word();
+                set_bc(read_word(temp));
+                wz=temp+1;
                 break;
+            }
             case 0x52:if(debug){cout<<"sbc hl,de"<<endl; }
                 set_hl(sbc16(get_hl(),get_de()));
                 break;
-            case 0x53:if(debug){cout<<"ld adr de"<<endl; }
-                write_word(next_word(),get_de());
+            case 0x53:if(debug){cout<<"ld adr de"<<endl; }{
+                unsigned short temp = next_word();
+                write_word(temp, get_de());
+                wz=temp+1;
                 break;
+            }
             case 0x5a:if(debug){cout<<"adc hl,de"<<endl; }
                 set_hl(adc16(get_hl(),get_de()));
                 break;
-            case 0x5b:if(debug){cout<<"ld de, adr"<<endl; }
-                set_de(read_word(next_word()));
+            case 0x5b:if(debug){cout<<"ld de, adr"<<endl; }{
+                unsigned short temp=next_word();
+                set_de(read_word(temp));
+                wz=temp+1;
                 break;
+            }
+
             case 0x5e:if(debug){cout<<"im 2"<<endl; }
                 interrupt_mode=2;
                 break;
             case 0x62:if(debug){cout<<"sbc hl,hl"<<endl; }
                 set_hl(sbc16(get_hl(),get_hl()));
                 break;
-            case 0x6a:if(debug){cout<<"adc hl,hl"<<endl; }
-                    set_hl(adc16(get_hl(),get_hl()));
+            case 0x67:if(debug){cout<<"rrd"<<endl; }{
+                uint8_t a = A;
+                uint8_t val = read_byte(get_hl());
+                A = (a & 0xF0) | (val & 0xF);
+                write_byte(get_hl(), (val >> 4) | (a << 4));
+                n = 0;
+                halfcarry = 0;
+                f3 = GET_BIT(3, A);
+                f5 = GET_BIT(5, A);
+                zero = A == 0;
+                sign = A >> 7;
+                check_parity(A);
+                wz=get_hl()+1;
                 break;
+            }
+
+
+
+            case 0x6a:if(debug){cout<<"adc hl,hl"<<endl; }
+                set_hl(adc16(get_hl(),get_hl()));
+                break;
+            case 0x6f:if(debug){cout<<"rld"<<endl; }{
+                uint8_t a = A;
+                uint8_t val = read_byte(get_hl());
+                A = (a & 0xF0) | (val >> 4);
+                write_byte(get_hl(), (val << 4) | (a & 0xF));
+
+                n = 0;
+                halfcarry = 0;
+                f3 = GET_BIT(3, A);
+                f5 = GET_BIT(5, A);
+                zero = A == 0;
+                sign = A >> 7;
+                check_parity(A);
+                wz=get_hl()+1;
+                break;
+            }
             case 0x72:if(debug){cout<<"sbc hl,sp"<<endl; }
                 set_hl(sbc16(get_hl(),sp));
                 break;
-            case 0x73:if(debug){cout<<"ld adr sp"<<endl; }
-                write_word(next_word(),sp);
+            case 0x73:if(debug){cout<<"ld adr sp"<<endl; }{
+                unsigned short temp=next_word();
+                write_word(temp,sp);
+                wz=temp+1;
                 break;
+            }
+
             case 0x7a:if(debug){cout<<"adc hl,sp"<<endl; }
                     set_hl(adc16(get_hl(),sp));
                 break;
-            case 0x7b:if(debug){cout<<"ld sp adr"<<endl; }
-                sp=read_word(next_word());
+            case 0x7b:if(debug){cout<<"ld sp adr"<<endl; }{
+                unsigned short temp=next_word();
+                sp=read_word(temp);
+                wz=temp+1;
                 break;
+            }
+
             case 0xa0:if(debug){cout<<"ldi"<<endl; }
                 ldi();
                 break;
             case 0xa1:if(debug){cout<<"cpi"<<endl; }
                 cpi();
+                break;
+            case 0xa8:if(debug){cout<<"ldd"<<endl; }
+                ldd();
                 break;
             case 0xa9:if(debug){cout<<"cpd"<<endl; }
                 cpd();
@@ -1916,18 +2081,33 @@ public:
                 ldi();
                 if(get_bc()>0){
                     pc-=2;
+                    wz=pc+1;
                 }
                 break;
             case 0xb1:if(debug){cout<<"cpir"<<endl; }
                 cpi();
                 if(!zero&&get_bc()!=0){
                     pc-=2;
+                    wz=pc+1;
+                }
+                else{
+                    wz++;
+                }
+                break;
+
+            case 0xb8:if(debug){cout<<"lldr"<<endl; }
+                ldd();
+                if (get_bc() != 0) {
+                    pc -= 2;
                 }
                 break;
             case 0xb9:if(debug){cout<<"cpdr"<<endl; }
                 cpd();
                 if(!zero&&get_bc()!=0){
                     pc-=2;
+                }
+                else{
+                    wz++;
                 }
                 break;
 
@@ -1992,16 +2172,145 @@ public:
             case 0x10:if(debug){cout<<"rl b"<<endl; }
                 B=rl(B);
                 break;
+            case 0x11:if(debug){cout<<"rl c"<<endl; }
+                C=rl(C);
+                break;
+            case 0x12:if(debug){cout<<"rl d"<<endl; }
+                D=rl(D);
+                break;
+            case 0x13:if(debug){cout<<"rl e"<<endl; }
+                E=rl(E);
+                break;
+            case 0x14:if(debug){cout<<"rl h"<<endl; }
+                H=rl(H);
+                break;
+            case 0x15:if(debug){cout<<"rl l"<<endl; }
+                L=rl(L);
+                break;
+            case 0x16:if(debug){cout<<"rl (hl)"<<endl; }
+                write_byte(get_hl(),rl(read_byte(get_hl())));
+                break;
+            case 0x17:if(debug){cout<<"rl a"<<endl; }
+                A=rl(A);
+                break;
+            case 0x18:if(debug){cout<<"rr b"<<endl; }
+                B=rr(B);
+                break;
+            case 0x19:if(debug){cout<<"rr c"<<endl; }
+                C=rr(C);
+                break;
+            case 0x1a:if(debug){cout<<"rr d"<<endl; }
+                D=rr(D);
+                break;
+            case 0x1b:if(debug){cout<<"rr e"<<endl; }
+                E=rr(E);
+                break;
+            case 0x1c:if(debug){cout<<"rr h"<<endl; }
+                H=rr(H);
+                break;
+            case 0x1d:if(debug){cout<<"rr l"<<endl; }
+                L=rr(L);
+                break;
+            case 0x1e:if(debug){cout<<"rr (hl)"<<endl; }
+                write_byte(get_hl(),rr(read_byte(get_hl())));
+                break;
+            case 0x1f:if(debug){cout<<"rr A"<<endl; }
+                A=rr(A);
+                break;
+            case 0x20:if(debug){cout<<"sla b"<<endl; }
+                B=sla(B);
+                break;
+            case 0x21:if(debug){cout<<"sla c"<<endl; }
+                C=sla(C);
+                break;
+            case 0x22:if(debug){cout<<"sla d"<<endl; }
+                D=sla(D);
+                break;
+            case 0x23:if(debug){cout<<"sla e"<<endl; }
+                E=sla(E);
+                break;
             case 0x24:if(debug){cout<<"sla h"<<endl; }
                 H=sla(H);
+                break;
+            case 0x25:if(debug){cout<<"sla l"<<endl; }
+                L=sla(L);
+                break;
+            case 0x26:if(debug){cout<<"sla (hl)"<<endl; }
+                write_byte(get_hl(),sla(read_byte(get_hl())));
+                break;
+            case 0x27:if(debug){cout<<"sla a"<<endl; }
+                A=sla(A);
+                break;
+            case 0x28:if(debug){cout<<"sra b"<<endl; }
+                B=sra(B);
+                break;
+            case 0x29:if(debug){cout<<"sra c"<<endl; }
+                C=sra(C);
+                break;
+            case 0x2a:if(debug){cout<<"sra d"<<endl; }
+                D=sra(D);
+                break;
+            case 0x2b:if(debug){cout<<"sra e"<<endl; }
+                E=sra(E);
+                break;
+            case 0x2c:if(debug){cout<<"sra h"<<endl; }
+                H=sra(H);
+                break;
+            case 0x2d:if(debug){cout<<"sra l"<<endl; }
+                L=sra(L);
+                break;
+            case 0x2e:if(debug){cout<<"sra (hl)"<<endl; }
+                write_byte(get_hl(),sra(read_byte(get_hl())));
+                break;
+            case 0x2f:if(debug){cout<<"sra A"<<endl; }
+                A=sra(A);
+                break;
+            case 0x30:if(debug){cout<<"sll b"<<endl; }
+                B=sll(B);
+                break;
+            case 0x31:if(debug){cout<<"sll c"<<endl; }
+                C=sll(C);
+                break;
+            case 0x32:if(debug){cout<<"sll d"<<endl; }
+                D=sll(D);
+                break;
+            case 0x33:if(debug){cout<<"sll e"<<endl; }
+                E=sll(E);
+                break;
+            case 0x34:if(debug){cout<<"sll h"<<endl; }
+                H=sll(H);
+                break;
+            case 0x35:if(debug){cout<<"sll l"<<endl; }
+                L=sll(L);
+                break;
+            case 0x36:if(debug){cout<<"sll (hl)"<<endl; }
+                write_byte(get_hl(),sll(read_byte(get_hl())));
+                break;
+            case 0x37:if(debug){cout<<"sll a"<<endl; }
+                A=sll(A);
+                break;
+            case 0x38:if(debug){cout<<"srl b"<<endl; }
+                B=srl(B);
                 break;
             case 0x39:if(debug){cout<<"srl c"<<endl; }
                 C=srl(C);
                 break;
+            case 0x3a:if(debug){cout<<"srl d"<<endl; }
+                D=srl(D);
+                break;
             case 0x3b:if(debug){cout<<"srl e"<<endl; }
                 E=srl(E);
                 break;
-            case 0x3f:if(debug){cout<<"ccf"<<endl; }
+            case 0x3c:if(debug){cout<<"srl h"<<endl; }
+                H=srl(H);
+                break;
+            case 0x3d:if(debug){cout<<"srl l"<<endl; }
+                L=srl(L);
+                break;
+            case 0x3e:if(debug){cout<<"srl (hl)"<<endl; }
+                write_byte(get_hl(),srl(read_byte(get_hl())));
+                break;
+            case 0x3f:if(debug){cout<<"srl A"<<endl; }
                 A=srl(A);
                 break;
             case 0x40:if(debug){cout<<"bit 0,b"<<endl; }
@@ -2024,6 +2333,7 @@ public:
                 break;
             case 0x46:if(debug){cout<<"bit 0,(hl)"<<endl; }
                 testbit(0,read_byte(get_hl()));
+                set_35(wz>>8);
                 break;
             case 0x47:if(debug){cout<<"bit 0,a"<<endl; }
                 testbit(0,A);
@@ -2048,6 +2358,7 @@ public:
                 break;
             case 0x4e:if(debug){cout<<"bit 1,(hl)"<<endl; }
                 testbit(1,read_byte(get_hl()));
+                set_35(wz>>8);
                 break;
             case 0x4f:if(debug){cout<<"bit 1,a"<<endl; }
                 testbit(1,A);
@@ -2073,6 +2384,7 @@ public:
                 break;
             case 0x56:if(debug){cout<<"bit 2,(hl)"<<endl; }
                 testbit(2,read_byte(get_hl()));
+                set_35(wz>>8);
                 break;
             case 0x57:if(debug){cout<<"bit 2,a"<<endl; }
                 testbit(2,A);
@@ -2097,6 +2409,7 @@ public:
                 break;
             case 0x5e:if(debug){cout<<"bit 3,(hl)"<<endl; }
                 testbit(3,read_byte(get_hl()));
+                set_35(wz>>8);
                 break;
             case 0x5f:if(debug){cout<<"bit 3,a"<<endl; }
                 testbit(3,A);
@@ -2122,6 +2435,7 @@ public:
                 break;
             case 0x66:if(debug){cout<<"bit 4,(hl)"<<endl; }
                 testbit(4,read_byte(get_hl()));
+                set_35(wz>>8);
                 break;
             case 0x67:if(debug){cout<<"bit 4,a"<<endl; }
                 testbit(4,A);
@@ -2146,6 +2460,7 @@ public:
                 break;
             case 0x6e:if(debug){cout<<"bit 5,(hl)"<<endl; }
                 testbit(5,read_byte(get_hl()));
+                set_35(wz>>8);
                 break;
             case 0x6f:if(debug){cout<<"bit 5,a"<<endl; }
                 testbit(5,A);
@@ -2171,6 +2486,7 @@ public:
                 break;
             case 0x76:if(debug){cout<<"bit 6,(hl)"<<endl; }
                 testbit(6,read_byte(get_hl()));
+                set_35(wz>>8);
                 break;
             case 0x77:if(debug){cout<<"bit 6,a"<<endl; }
                 testbit(6,A);
@@ -2195,28 +2511,206 @@ public:
                 break;
             case 0x7e:if(debug){cout<<"bit 7,(hl)"<<endl; }
                 testbit(7,read_byte(get_hl()));
+                set_35(wz>>8);
                 break;
             case 0x7f:if(debug){cout<<"bit 7,a"<<endl; }
                 testbit(7,A);
                 break;
 
-
+            case 0x80:if(debug){cout<<"res 0,b"<<endl; }
+                B=resetbit(0,B);
+                break;
+            case 0x81:if(debug){cout<<"res 0,c"<<endl; }
+                C=resetbit(0,C);
+                break;
+            case 0x82:if(debug){cout<<"res 0,d"<<endl; }
+                D=resetbit(0,D);
+                break;
+            case 0x83:if(debug){cout<<"res 0,e"<<endl; }
+                E=resetbit(0,E);
+                break;
+            case 0x84:if(debug){cout<<"res 0,h"<<endl; }
+                H=resetbit(0,H);
+                break;
+            case 0x85:if(debug){cout<<"res 0,l"<<endl; }
+                L=resetbit(0,L);
+                break;
             case 0x86:if(debug){cout<<"res 0,(hl)"<<endl; }
                 write_byte(get_hl(),resetbit(0,read_byte(get_hl())));
+                break;
+            case 0x87:if(debug){cout<<"res 0,a"<<endl; }
+                A=resetbit(0,A);
+                break;
+            case 0x88:if(debug){cout<<"res 1,b"<<endl; }
+                B=resetbit(1,B);
+                break;
+            case 0x89:if(debug){cout<<"res 1,c"<<endl; }
+                C=resetbit(1,C);
+                break;
+            case 0x8a:if(debug){cout<<"res 1,d"<<endl; }
+                D=resetbit(1,D);
+                break;
+            case 0x8b:if(debug){cout<<"res 1,e"<<endl; }
+                E=resetbit(1,E);
+                break;
+            case 0x8c:if(debug){cout<<"res 1,h"<<endl; }
+                H=resetbit(1,H);
+                break;
+            case 0x8d:if(debug){cout<<"res 1,l"<<endl; }
+                L=resetbit(1,L);
                 break;
             case 0x8e:if(debug){cout<<"res 1,(hl)"<<endl; }
                 write_byte(get_hl(),resetbit(1,read_byte(get_hl())));
                 break;
+            case 0x8f:if(debug){cout<<"res 1,a"<<endl; }
+                A=resetbit(1,A);
+                break;
 
+            case 0x90:if(debug){cout<<"res 2,b"<<endl; }
+                B=resetbit(2,B);
+                break;
+            case 0x91:if(debug){cout<<"res 2,c"<<endl; }
+                C=resetbit(2,C);
+                break;
+            case 0x92:if(debug){cout<<"res 2,d"<<endl; }
+                D=resetbit(2,D);
+                break;
+            case 0x93:if(debug){cout<<"res 2,e"<<endl; }
+                E=resetbit(2,E);
+                break;
+            case 0x94:if(debug){cout<<"res 2,h"<<endl; }
+                H=resetbit(2,H);
+                break;
+            case 0x95:if(debug){cout<<"res 2,l"<<endl; }
+                L=resetbit(2,L);
+                break;
+            case 0x96:if(debug){cout<<"res 2,(hl)"<<endl; }
+                write_byte(get_hl(),resetbit(2,read_byte(get_hl())));
+                break;
+            case 0x97:if(debug){cout<<"res 2,a"<<endl; }
+                A=resetbit(2,A);
+                break;
+            case 0x98:if(debug){cout<<"res 3,b"<<endl; }
+                B=resetbit(3,B);
+                break;
+            case 0x99:if(debug){cout<<"res 3,c"<<endl; }
+                C=resetbit(3,C);
+                break;
+            case 0x9a:if(debug){cout<<"res 3,d"<<endl; }
+                D=resetbit(3,D);
+                break;
+            case 0x9b:if(debug){cout<<"res 3,e"<<endl; }
+                E=resetbit(3,E);
+                break;
+            case 0x9c:if(debug){cout<<"res 3,h"<<endl; }
+                H=resetbit(3,H);
+                break;
+            case 0x9d:if(debug){cout<<"res 3,l"<<endl; }
+                L=resetbit(3,L);
+                break;
+            case 0x9e:if(debug){cout<<"res 3,(hl)"<<endl; }
+                write_byte(get_hl(),resetbit(3,read_byte(get_hl())));
+                break;
+            case 0x9f:if(debug){cout<<"res 3,a"<<endl; }
+                A=resetbit(3,A);
+                break;
+
+            case 0xa0:if(debug){cout<<"res 4,b"<<endl; }
+                B=resetbit(4,B);
+                break;
+            case 0xa1:if(debug){cout<<"res 4,c"<<endl; }
+                C=resetbit(4,C);
+                break;
+            case 0xa2:if(debug){cout<<"res 4,d"<<endl; }
+                D=resetbit(4,D);
+                break;
+            case 0xa3:if(debug){cout<<"res 4,e"<<endl; }
+                E=resetbit(4,E);
+                break;
+            case 0xa4:if(debug){cout<<"res 4,h"<<endl; }
+                H=resetbit(4,H);
+                break;
+            case 0xa5:if(debug){cout<<"res 4,l"<<endl; }
+                L=resetbit(4,L);
+                break;
+            case 0xa6:if(debug){cout<<"res 4,(hl)"<<endl; }
+                write_byte(get_hl(),resetbit(4,read_byte(get_hl())));
+                break;
+            case 0xa7:if(debug){cout<<"res 4,a"<<endl; }
+                A=resetbit(4,A);
+                break;
+            case 0xa8:if(debug){cout<<"res 5,b"<<endl; }
+                B=resetbit(5,B);
+                break;
+            case 0xa9:if(debug){cout<<"res 5,c"<<endl; }
+                C=resetbit(5,C);
+                break;
+            case 0xaa:if(debug){cout<<"res 5,d"<<endl; }
+                D=resetbit(5,D);
+                break;
+            case 0xab:if(debug){cout<<"res 5,e"<<endl; }
+                E=resetbit(5,E);
+                break;
+            case 0xac:if(debug){cout<<"res 5,h"<<endl; }
+                H=resetbit(5,H);
+                break;
+            case 0xad:if(debug){cout<<"res 5,l"<<endl; }
+                L=resetbit(5,L);
+                break;
             case 0xae:if(debug){cout<<"res 5,(hl)"<<endl; }
                 write_byte(get_hl(),resetbit(5,read_byte(get_hl())));
                 break;
+            case 0xaf:if(debug){cout<<"res 5,a"<<endl; }
+                A=resetbit(5,A);
+                break;
 
+            case 0xb0:if(debug){cout<<"res 6,b"<<endl; }
+                B=resetbit(6,B);
+                break;
+            case 0xb1:if(debug){cout<<"res 6,c"<<endl; }
+                C=resetbit(6,C);
+                break;
+            case 0xb2:if(debug){cout<<"res 6,d"<<endl; }
+                D=resetbit(6,D);
+                break;
+            case 0xb3:if(debug){cout<<"res 6,e"<<endl; }
+                E=resetbit(6,E);
+                break;
+            case 0xb4:if(debug){cout<<"res 6,h"<<endl; }
+                H=resetbit(6,H);
+                break;
+            case 0xb5:if(debug){cout<<"res 6,l"<<endl; }
+                L=resetbit(6,L);
+                break;
             case 0xb6:if(debug){cout<<"res 6,(hl)"<<endl; }
                 write_byte(get_hl(),resetbit(6,read_byte(get_hl())));
                 break;
+            case 0xb7:if(debug){cout<<"res 6,a"<<endl; }
+                A=resetbit(6,A);
+                break;
+            case 0xb8:if(debug){cout<<"res 7,b"<<endl; }
+                B=resetbit(7,B);
+                break;
+            case 0xb9:if(debug){cout<<"res 7,c"<<endl; }
+                C=resetbit(7,C);
+                break;
+            case 0xba:if(debug){cout<<"res 7,d"<<endl; }
+                D=resetbit(7,D);
+                break;
+            case 0xbb:if(debug){cout<<"res 7,e"<<endl; }
+                E=resetbit(7,E);
+                break;
+            case 0xbc:if(debug){cout<<"res 7,h"<<endl; }
+                H=resetbit(7,H);
+                break;
+            case 0xbd:if(debug){cout<<"res 7,l"<<endl; }
+                L=resetbit(7,L);
+                break;
             case 0xbe:if(debug){cout<<"res 7,(hl)"<<endl; }
                 write_byte(get_hl(),resetbit(7,read_byte(get_hl())));
+                break;
+            case 0xbf:if(debug){cout<<"res 7,a"<<endl; }
+                A=resetbit(7,A);
                 break;
 
             case 0xc0:if(debug){cout<<"set 0,B"<<endl; }
@@ -2290,7 +2784,7 @@ public:
                 write_byte(get_hl(),setbit(2,read_byte(get_hl())));
                 break;
             case 0xd7:if(debug){cout<<"set 2,A"<<endl; }
-                A=setbit(1,A);
+                A=setbit(2,A);
                 break;
             case 0xd8:if(debug){cout<<"set 3,B"<<endl; }
                 B=setbit(3,B);
@@ -2317,64 +2811,101 @@ public:
                 A=setbit(3,A);
                 break;
             case 0xe0:if(debug){cout<<"set 4,B"<<endl; }
-                B=setbit(2,B);
+                B=setbit(4,B);
                 break;
             case 0xe1:if(debug){cout<<"set 4,C"<<endl; }
-                C=setbit(2,C);
+                C=setbit(4,C);
                 break;
             case 0xe2:if(debug){cout<<"set 4,D"<<endl; }
-                D=setbit(2,D);
+                D=setbit(4,D);
                 break;
             case 0xe3:if(debug){cout<<"set 4,E"<<endl; }
-                E=setbit(2,E);
+                E=setbit(4,E);
                 break;
             case 0xe4:if(debug){cout<<"set 4,H"<<endl; }
-                H=setbit(2,H);
+                H=setbit(4,H);
                 break;
             case 0xe5:if(debug){cout<<"set 4,L"<<endl; }
-                L=setbit(2,L);
+                L=setbit(4,L);
                 break;
             case 0xe6:if(debug){cout<<"set 4,(hl)"<<endl; }
                 write_byte(get_hl(),setbit(4,read_byte(get_hl())));
                 break;
             case 0xe7:if(debug){cout<<"set 4,A"<<endl; }
-                A=setbit(1,A);
+                A=setbit(4,A);
                 break;
             case 0xe8:if(debug){cout<<"set 5,B"<<endl; }
-                B=setbit(3,B);
+                B=setbit(5,B);
                 break;
             case 0xe9:if(debug){cout<<"set 5,c"<<endl; }
-                C=setbit(3,C);
+                C=setbit(5,C);
                 break;
             case 0xea:if(debug){cout<<"set 5,D"<<endl; }
-                D=setbit(3,D);
+                D=setbit(5,D);
                 break;
             case 0xeb:if(debug){cout<<"set 5,E"<<endl; }
-                E=setbit(3,E);
+                E=setbit(5,E);
                 break;
             case 0xec:if(debug){cout<<"set 5,H"<<endl; }
-                H=setbit(3,H);
+                H=setbit(5,H);
                 break;
             case 0xed:if(debug){cout<<"set 5,L"<<endl; }
-                L=setbit(3,L);
+                L=setbit(5,L);
                 break;
             case 0xee:if(debug){cout<<"set 5,(hl)"<<endl; }
                 write_byte(get_hl(),setbit(5,read_byte(get_hl())));
                 break;
             case 0xef:if(debug){cout<<"set 5,A"<<endl; }
-                A=setbit(3,A);
+                A=setbit(5,A);
                 break;
-            case 0xf3:if(debug){cout<<"set 6,E"<<endl; }
+
+            case 0xf0:if(debug){cout<<"set 6,b"<<endl; }
+                B=setbit(6,B);
+                break;
+            case 0xf1:if(debug){cout<<"set 6,c"<<endl; }
+                C=setbit(6,C);
+                break;
+            case 0xf2:if(debug){cout<<"set 6,d"<<endl; }
+                D=setbit(6,D);
+                break;
+            case 0xf3:if(debug){cout<<"set 6,e"<<endl; }
                 E=setbit(6,E);
+                break;
+            case 0xf4:if(debug){cout<<"set 6,h"<<endl; }
+                H=setbit(6,H);
+                break;
+            case 0xf5:if(debug){cout<<"set 6,l"<<endl; }
+                L=setbit(6,L);
                 break;
             case 0xf6:if(debug){cout<<"set 6,(hl)"<<endl; }
                 write_byte(get_hl(),setbit(6,read_byte(get_hl())));
                 break;
+            case 0xf7:if(debug){cout<<"set 6,l"<<endl; }
+                A=setbit(6,A);
+                break;
+            case 0xf8:if(debug){cout<<"set 7,b"<<endl; }
+                B=setbit(7,B);
+                break;
+            case 0xf9:if(debug){cout<<"set 7,c"<<endl; }
+                C=setbit(7,C);
+                break;
+            case 0xfa:if(debug){cout<<"set 7,d"<<endl; }
+                D=setbit(7,D);
+                break;
             case 0xfb:if(debug){cout<<"set 7,e"<<endl; }
-                E|=0x80;
+                E=setbit(7,E);
+                break;
+            case 0xfc:if(debug){cout<<"set 7,h"<<endl; }
+                H=setbit(7,H);
+                break;
+            case 0xfd:if(debug){cout<<"set 7,l"<<endl; }
+                L=setbit(7,L);
                 break;
             case 0xfe:if(debug){cout<<"set 7,(hl)"<<endl; }
                 write_byte(get_hl(),setbit(7,read_byte(get_hl())));
+                break;
+            case 0xff:if(debug){cout<<"set 7,l"<<endl; }
+                A=setbit(7,A);
                 break;
             default:cout<<"bit opcode not implemented "<<(int)op<<endl;cout<<tc<<endl<<pc; exit(0x15);
 
@@ -2467,29 +2998,162 @@ public:
                 write_byte(adr,next_byte());
                 break;
             }
-
-
             case 0x39:if(debug){cout<<"add ix,sp"<<endl; }
                 index=(add16(index,sp));
                 break;
+
+            case 0x40 ... 0x43:
+                run_op(op);
+                break;
+            case 0x44:if(debug){cout<<"ld b,ixh"<<endl; }
+                B=index>>8;
+                break;
+            case 0x45:if(debug){cout<<"ld b,ixl"<<endl; }
+                B=index&0xff;
+                break;
+
             case 0x46:if(debug){cout<<"ld b,(ix+d8)"<<endl; }
                 B=read_byte(index+next_byte());
                 break;
+            case 0x47 ... 0x4b:
+                run_op(op);
+                break;
+
+            case 0x4c:if(debug){cout<<"ld c,ixh"<<endl; }
+                C=index>>8;
+                break;
+            case 0x4d:if(debug){cout<<"ld c,ixl"<<endl; }
+                C=index&0xff;
+                break;
+
             case 0x4e:if(debug){cout<<"ld b,(ix+d8)"<<endl; }
                 C=read_byte(index+next_byte());
                 break;
+            case 0x4f:
+                run_op(0x4f);
+                break;
+
+            case 0x50 ... 0x53:
+                run_op(op);
+                break;
+            case 0x54:if(debug){cout<<"ld d,ixh"<<endl; }
+                D=index>>8;
+                break;
+            case 0x55:if(debug){cout<<"ld d,ixl"<<endl; }
+                D=index&0xff;
+                break;
+
             case 0x56:if(debug){cout<<"ld d,(ix+d8)"<<endl; }
                 D=read_byte(index+next_byte());
                 break;
+
+            case 0x57 ... 0x5b:
+                run_op(op);
+                break;
+            case 0x5c:if(debug){cout<<"ld e,ixh"<<endl; }
+                E=index>>8;
+                break;
+            case 0x5d:if(debug){cout<<"ld e,ixl"<<endl; }
+                E=index&0xff;
+                break;
+
             case 0x5e:if(debug){cout<<"ld e,(ix+d8)"<<endl; }
                 E=read_byte(index+next_byte());
                 break;
+            case 0x5f:
+                run_op(0x5f);
+                break;
+            case 0x60:if(debug){cout<<"ld ixh, b"<<endl; }{
+                unsigned char ih=(index>>8);
+                ih=B;
+                index=(ih<<8)|(index&0xff);
+                break;
+            }
+            case 0x61:if(debug){cout<<"ld ixh, c"<<endl; }{
+                unsigned char ih=(index>>8);
+                ih=C;
+                index=(ih<<8)|(index&0xff);
+                break;
+            }
+            case 0x62:if(debug){cout<<"ld ixh, d"<<endl; }{
+                unsigned char ih=(index>>8);
+                ih=D;
+                index=(ih<<8)|(index&0xff);
+                break;
+            }
+            case 0x63:if(debug){cout<<"ld ixh, e"<<endl; }{
+                unsigned char ih=(index>>8);
+                ih=E;
+                index=(ih<<8)|(index&0xff);
+                break;
+            }
+            case 0x64:if(debug){cout<<"ld ixh, ixh"<<endl; }{
+                unsigned char ih=(index>>8);
+                ih=ih;
+                index=(ih<<8)|(index&0xff);
+                break;
+            }
+            case 0x65:if(debug){cout<<"ld ixh, ixl"<<endl; }{
+                unsigned char ih=(index>>8);
+                ih=index&0xff;
+                index=(ih<<8)|(index&0xff);
+                break;
+            }
+
             case 0x66:if(debug){cout<<"ld h,(ix+d8)"<<endl; }
                 H=read_byte(index+next_byte());
                 break;
+            case 0x67:if(debug){cout<<"ld ixh, a"<<endl; }{
+                unsigned char ih=(index>>8);
+                ih=A;
+                index=(ih<<8)|(index&0xff);
+                break;
+            }
+            case 0x68:if(debug){cout<<"ld ixl, b"<<endl; }{
+                unsigned char il=(index&0xff);
+                il=B;
+                index=(il)|(index&0xff00);
+                break;
+            }
+            case 0x69:if(debug){cout<<"ld ixl, c"<<endl; }{
+                unsigned char il=(index&0xff);
+                il=C;
+                index=(il)|(index&0xff00);
+                break;
+            }
+            case 0x6a:if(debug){cout<<"ld ixl, d"<<endl; }{
+                unsigned char il=(index&0xff);
+                il=D;
+                index=(il)|(index&0xff00);
+                break;
+            }
+            case 0x6b:if(debug){cout<<"ld ixl, e"<<endl; }{
+                unsigned char il=(index&0xff);
+                il=E;
+                index=(il)|(index&0xff00);
+                break;
+            }
+            case 0x6c:if(debug){cout<<"ld ixl, ixh"<<endl; }{
+                unsigned char il=(index&0xff);
+                il=index>>8;
+                index=(il)|(index&0xff00);
+                break;
+            }
+            case 0x6d:if(debug){cout<<"ld ixl, ixl"<<endl; }{
+                unsigned char il=(index&0xff);
+                il=il;
+                index=(il)|(index&0xff00);
+                break;
+            }
             case 0x6e:if(debug){cout<<"ld l,(ix+d8)"<<endl; }
                 L=read_byte(index+next_byte());
                 break;
+            case 0x6f:if(debug){cout<<"ld ixl, a"<<endl; }{
+                unsigned char il=(index&0xff);
+                il=A;
+                index=(il)|(index&0xff00);
+                break;
+            }
             case 0x70:if(debug){cout<<"ld (ix+d8),b"<<endl; }
                 write_byte(index+next_byte(),B);
                 break;
@@ -2513,8 +3177,20 @@ public:
                 write_byte(adr,A);
                 break;
             }
+            case 0x78 ... 0x7b:
+                run_op(op);
+                break;
+            case 0x7c:if(debug){cout<<"ld a,ixh"<<endl; }
+                A=index>>8;
+                break;
+            case 0x7d:if(debug){cout<<"ld a,ixl"<<endl; }
+                A=index&0xff;
+                break;
             case 0x7e:if(debug){cout<<"ld a,(ix+d8)"<<endl; }
                 A=read_byte(index+next_byte());
+                break;
+            case 0x7f:
+                run_op(0x7f);
                 break;
             case 0x84:if(debug){cout<<"add a,ixh"<<endl; }
                 A=add8(A,index>>8,0);
@@ -2606,32 +3282,62 @@ public:
         unsigned char op=next_byte();
         cycles+=OPCODES_CYCLES_XYBITS[op];
         switch(op){
+            case 0x06:if(debug){cout<<"rlc (ix+*)"<<endl; }
+                write_byte(adr,rlc(read_byte(adr)));
+                break;
+            case 0x0e:if(debug){cout<<"rrc (ix+*)"<<endl; }
+                write_byte(adr,rrc(read_byte(adr)));
+                break;
             case 0x16:if(debug){cout<<"rl (ix+*)"<<endl; }
                 write_byte(adr,rl(read_byte(adr)));
                 break;
+            case 0x1e:if(debug){cout<<"rr (ix+*)"<<endl; }
+                write_byte(adr,rr(read_byte(adr)));
+                break;
+            case 0x26:if(debug){cout<<"sla (ix+*)"<<endl; }
+                write_byte(adr,sla(read_byte(adr)));
+                break;
+            case 0x2e:if(debug){cout<<"sra (ix+*)"<<endl; }
+                write_byte(adr,sra(read_byte(adr)));
+                break;
+            case 0x36:if(debug){cout<<"sll (ix+*)"<<endl; }
+                write_byte(adr,sll(read_byte(adr)));
+                break;
+            case 0x3e:if(debug){cout<<"srl (ix+*)"<<endl; }
+                write_byte(adr,srl(read_byte(adr)));
+                break;
+
             case 0x40 ... 0x47:if(debug){cout<<"bit 0, (ix+*)"<<endl; }
                 testbit(0,read_byte(adr));
+                set_35(adr>>8);
                 break;
             case 0x48 ... 0x4f:if(debug){cout<<"bit 1, (ix+*)"<<endl; }
                 testbit(1,read_byte(adr));
+                set_35(adr>>8);
                 break;
             case 0x50 ... 0x57:if(debug){cout<<"bit 2, (ix+*)"<<endl; }
                 testbit(2,read_byte(adr));
+                set_35(adr>>8);
                 break;
             case 0x58 ... 0x5f:if(debug){cout<<"bit 3, (ix+*)"<<endl; }
                 testbit(3,read_byte(adr));
+                set_35(adr>>8);
                 break;
             case 0x60 ... 0x67:if(debug){cout<<"bit 4, (ix+*)"<<endl; }
                 testbit(4,read_byte(adr));
+                set_35(adr>>8);
                 break;
             case 0x68 ... 0x6f:if(debug){cout<<"bit 5, (ix+*)"<<endl; }
                 testbit(5,read_byte(adr));
+                set_35(adr>>8);
                 break;
             case 0x70 ... 0x77:if(debug){cout<<"bit 6, (ix+*)"<<endl; }
                 testbit(6,read_byte(adr));
+                set_35(adr>>8);
                 break;
             case 0x78 ... 0x7f:if(debug){cout<<"bit 7, (ix+*)"<<endl; }
                 testbit(7,read_byte(adr));
+                set_35(adr>>8);
                 break;
 
             case 0x80 ... 0x87:if(debug){cout<<"res 0,(ix+*)"<<endl; }
