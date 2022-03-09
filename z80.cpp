@@ -13,7 +13,7 @@ public:
     unsigned char interupt_data;
     unsigned char interrupt_vector;
     bool debug= false;
-    bool cpm= true;
+    bool cpm= false;
     long long breakpoint=0;//0x1549420e6;//767742574;
     unsigned char OPCODES_CYCLES[256] = {
 //  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
@@ -861,7 +861,8 @@ public:
     bool keys[16];
     unsigned char memory[0x10000];
     long long cycles;
-    z80(){
+    z80(bool c=false){
+        cpm=c;
         fp = fopen ("file.txt", "a");
 
         cycles=0;
@@ -1013,7 +1014,7 @@ public:
                         get_ix(),
                         get_iy(),
                         read_byte(get_hl()),
-                        read_byte(pc)<<24|read_byte(pc+1)<<16|read_byte(pc+2)<<8|read_byte(pc+3),lbr, 0);
+                        read_byte(pc)<<24   |read_byte(pc+1)<<16|read_byte(pc+2)<<8|read_byte(pc+3),lbr, 0);
             }
         }
 
@@ -1056,21 +1057,21 @@ public:
     void run_maskable_innterrupt(unsigned char x){
         //cout<<(int)read_byte(0x5000);
         if (interrupts_enabled&ffIFF1){
-                    //cout<<"interrupt"<<endl;
-                    //fprintf(fp,"hello irq %02X\n",interrupt_vector);
-                    if (halt){
-                        halt=false;
-                        pc++;
-                    }
-                    if(ffIFF1){
-                        ffIFF2=ffIFF1=false;
-                        if(interrupt_mode==0){
-                            run_op(x);
-                        }
-                        else if(interrupt_mode==2){
-                            call(read_word(i<<8|interrupt_vector));
-                        }
-                    }
+            //cout<<"interrupt"<<endl;
+            //fprintf(fp,"hello irq %02X\n",interrupt_vector);
+            if (halt){
+                halt=false;
+                pc++;
+            }
+            if(ffIFF1){
+                ffIFF2=ffIFF1=false;
+                if(interrupt_mode==0){
+                    run_op(x);
+                }
+                else if(interrupt_mode==2){
+                    call(read_word(i<<8|interrupt_vector));
+                }
+            }
         }
 
     }

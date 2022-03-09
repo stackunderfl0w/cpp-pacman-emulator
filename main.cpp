@@ -8,7 +8,7 @@
 
 #include <iostream>
 #include<SDL2/SDL.h>
-#include <SDL2/SDL_ttf.h>
+//#include <SDL2/SDL_ttf.h>
 #include "Screen.cpp"
 #include "i8080.cpp"
 #include "z80.cpp"
@@ -70,15 +70,15 @@ int main(int argv, char** args) {
 
     // insert code here...
     cout << "Hello, World!\n";
-    z80 cpu;
+    cout<<strstr(args[1],".com")<<endl;
+    bool cpm = args[1]!= nullptr && strstr(args[1],".com")!= nullptr;
+    cout<<(int)cpm<<endl;
+    z80 cpu=z80(cpm);
     SDL_Init(SDL_INIT_VIDEO);
-    TTF_Init();
     Screen screen;
 
     SDL_Event e;
     bool running = true;
-
-
 
     int arg = 2;
     if(args[1]!=NULL){
@@ -86,7 +86,6 @@ int main(int argv, char** args) {
         cout<<filename<<endl;
         cout<<filename.find(".zip")<<endl;
         const char * c = filename.c_str();
-
         if (filename.find(".zip")<0x1000){
             zip_extract(args[1], "tmp", on_extract_entry, &arg);
             load_file("tmp/pacman.6e",cpu.memory,0x0000);
@@ -208,9 +207,9 @@ int main(int argv, char** args) {
             //for (int i = 0; i < 50000; ++i){cpu.cycle();}
             if ((systime-last_frame_render)/1000>15){
                 last_frame_render=systime;
-                //screen.render(cpu.memory);
+                screen.render(cpu.memory);
             }
-            screen.render(cpu.memory);
+            //screen.render(cpu.memory);
 
             //thread thread_obj(screen.render,cpu.memory);
 
@@ -229,7 +228,7 @@ int main(int argv, char** args) {
     #if defined _WIN32 || defined _WIN64
         system( "rmdir /s /q tmp");
     #else
-        system( "rm -rf /tmp");
+        system( "rm -rf ./tmp");
     #endif
     SDL_version compiled;
     SDL_version linked;
